@@ -296,12 +296,23 @@ def watch_folder(
         observer.join()
 
 
+def is_already_converted(nc_path: Path, state: dict) -> bool:
+    try:
+        fp = _fingerprint(nc_path)
+    except FileNotFoundError:
+        return False
+    prev = state.get("files", {}).get(str(nc_path))
+    return prev == fp
+
+
 def run_gui(
     input_dir: Path,
     output_dir: Path,
     *,
+    state_path: Path = DEFAULT_STATE_PATH,
     variables: list[str] | None = None,
     output_format: str = "long-sparse",
+    force: bool = False,
 ) -> None:
     import tkinter as tk
     from tkinter import messagebox, ttk
@@ -343,6 +354,9 @@ def run_gui(
 
     cached_paths: list[Path] = []
 
+    def load_state() -> dict:
+        return _load_state(state_path)
+
     def refresh_file_list() -> None:
         nonlocal cached_paths
 
@@ -350,15 +364,22 @@ def run_gui(
         if current == cached_paths:
             return
 
-        selected_names = {files_list.get(i) for i in files_list.curselection()}
+        selected_paths = {
+            cached_paths[i]
+            for i in files_list.curselection()
+            if 0 <= i < len(cached_paths)
+        }
+
+        state = load_state()
 
         files_list.delete(0, tk.END)
         for p in current:
-            files_list.insert(tk.END, p.name)
+            label = f"{p.name}  (converted)" if is_already_converted(p, state) else p.name
+            files_list.insert(tk.END, label)
 
-        # Restore selection by filename (best-effort)
+        # Restore selection by path (best-effort)
         for i, p in enumerate(current):
-            if p.name in selected_names:
+            if p in selected_paths:
                 files_list.selection_set(i)
 
         cached_paths = current
@@ -375,10 +396,16 @@ def run_gui(
             return
 
         converted = 0
+        skipped = 0
         errors: list[str] = []
+
+        state = load_state()
 
         for nc_path in to_convert:
             try:
+                if (not force) and is_already_converted(nc_path, state):
+                    skipped += 1
+                    continue
                 status_var.set(f"Converting: {nc_path.name} ...")
                 root.update_idletasks()
                 wait_for_stable_file(nc_path)
@@ -388,21 +415,28 @@ def run_gui(
                     variables=variables,
                     output_format=output_format,
                 )
+                state.setdefault("files", {})[str(nc_path)] = _fingerprint(nc_path)
                 converted += 1
             except Exception as exc:
                 errors.append(f"{nc_path.name}: {exc}")
 
+        _save_state(state_path, state)
+
         if errors:
-            status_var.set(f"Converted {converted} file(s) with {len(errors)} error(s).")
+            status_var.set(
+                f"Converted {converted}, skipped {skipped} with {len(errors)} error(s)."
+            )
             messagebox.showerror(
                 "Convert",
                 "Some files failed to convert:\n\n" + "\n".join(errors),
             )
         else:
-            status_var.set(f"Done. Converted {converted} file(s). Output: {output_dir}")
+            status_var.set(
+                f"Done. Converted {converted}, skipped {skipped}. Output: {output_dir}"
+            )
             messagebox.showinfo(
                 "Convert",
-                f"Done. Converted {converted} file(s).\n\nSaved to:\n{output_dir}",
+                f"Done. Converted {converted} file(s), skipped {skipped} already converted.\n\nSaved to:\n{output_dir}",
             )
 
         refresh_file_list()
@@ -507,8 +541,10 @@ def main() -> None:
         run_gui(
             args.input,
             args.output,
+            state_path=args.state,
             variables=args.variables,
             output_format=args.format,
+            force=args.force,
         )
         return
 
