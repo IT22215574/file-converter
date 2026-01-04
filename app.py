@@ -296,6 +296,135 @@ def watch_folder(
         observer.join()
 
 
+def run_gui(
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    variables: list[str] | None = None,
+    output_format: str = "long-sparse",
+) -> None:
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    input_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    root = tk.Tk()
+    root.title("NetCDF → CSV Converter")
+
+    container = ttk.Frame(root, padding=12)
+    container.grid(row=0, column=0, sticky="nsew")
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+    container.columnconfigure(0, weight=1)
+    container.rowconfigure(1, weight=1)
+
+    ttk.Label(container, text=f"Files folder: {input_dir}").grid(
+        row=0, column=0, sticky="w"
+    )
+
+    list_frame = ttk.Frame(container)
+    list_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 8))
+    list_frame.columnconfigure(0, weight=1)
+    list_frame.rowconfigure(0, weight=1)
+
+    files_list = tk.Listbox(list_frame, selectmode=tk.EXTENDED)
+    files_list.grid(row=0, column=0, sticky="nsew")
+
+    scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=files_list.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    files_list.configure(yscrollcommand=scrollbar.set)
+
+    status_var = tk.StringVar(value=f"Output folder: {output_dir}")
+    ttk.Label(container, textvariable=status_var).grid(row=2, column=0, sticky="w")
+
+    button_row = ttk.Frame(container)
+    button_row.grid(row=3, column=0, sticky="e", pady=(8, 0))
+
+    cached_paths: list[Path] = []
+
+    def refresh_file_list() -> None:
+        nonlocal cached_paths
+
+        current = list(iter_nc_files(input_dir))
+        if current == cached_paths:
+            return
+
+        selected_names = {files_list.get(i) for i in files_list.curselection()}
+
+        files_list.delete(0, tk.END)
+        for p in current:
+            files_list.insert(tk.END, p.name)
+
+        # Restore selection by filename (best-effort)
+        for i, p in enumerate(current):
+            if p.name in selected_names:
+                files_list.selection_set(i)
+
+        cached_paths = current
+
+    def on_convert() -> None:
+        selection = list(files_list.curselection())
+        if not selection:
+            messagebox.showinfo("Convert", "Select one or more .nc files to convert.")
+            return
+
+        to_convert = [cached_paths[i] for i in selection if i < len(cached_paths)]
+        if not to_convert:
+            messagebox.showinfo("Convert", "No valid files selected.")
+            return
+
+        converted = 0
+        errors: list[str] = []
+
+        for nc_path in to_convert:
+            try:
+                status_var.set(f"Converting: {nc_path.name} ...")
+                root.update_idletasks()
+                wait_for_stable_file(nc_path)
+                convert_nc_to_csv(
+                    nc_path,
+                    output_dir,
+                    variables=variables,
+                    output_format=output_format,
+                )
+                converted += 1
+            except Exception as exc:
+                errors.append(f"{nc_path.name}: {exc}")
+
+        if errors:
+            status_var.set(f"Converted {converted} file(s) with {len(errors)} error(s).")
+            messagebox.showerror(
+                "Convert",
+                "Some files failed to convert:\n\n" + "\n".join(errors),
+            )
+        else:
+            status_var.set(f"Done. Converted {converted} file(s). Output: {output_dir}")
+            messagebox.showinfo(
+                "Convert",
+                f"Done. Converted {converted} file(s).\n\nSaved to:\n{output_dir}",
+            )
+
+        refresh_file_list()
+
+    def on_refresh() -> None:
+        refresh_file_list()
+        status_var.set(f"Refreshed. Output folder: {output_dir}")
+
+    ttk.Button(button_row, text="Refresh", command=on_refresh).grid(
+        row=0, column=0, padx=(0, 8)
+    )
+    ttk.Button(button_row, text="Convert", command=on_convert).grid(row=0, column=1)
+
+    def poll() -> None:
+        refresh_file_list()
+        root.after(1500, poll)
+
+    poll()
+    root.minsize(620, 380)
+    root.mainloop()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Watch the Files/ folder for NetCDF (.nc) files and convert them to CSV."
@@ -348,9 +477,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Convert any unprocessed .nc files once, then exit",
     )
+    mode.add_argument(
+        "--gui",
+        action="store_true",
+        help="Open a desktop app to select and convert files",
+    )
 
     args = parser.parse_args()
-    if not args.watch and not args.once:
+    if not args.watch and not args.once and not args.gui:
         args.watch = True
 
     if args.variables:
@@ -368,6 +502,15 @@ def main() -> None:
     state = _load_state(args.state)
     state["format"] = args.format
     _save_state(args.state, state)
+
+    if args.gui:
+        run_gui(
+            args.input,
+            args.output,
+            variables=args.variables,
+            output_format=args.format,
+        )
+        return
 
     if args.once:
         changed = process_existing(

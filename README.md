@@ -12,6 +12,14 @@ Create/activate your environment (this workspace already has `.venv/` configured
 
 ## Run
 
+### Desktop app (select files and convert)
+
+```bash
+./.venv/bin/python app.py --gui
+```
+
+Select one or more `.nc` files from `Files/`, then press **Convert**. Output CSVs will be written to `Converted files/`.
+
 ### Watch mode (recommended)
 
 ```bash

@@ -1,0 +1,5 @@
+xarray>=2024.10.0
+pandas>=2.2.0
+numpy>=1.26.0
+netCDF4>=1.6.5
+watchdog>=4.0.0
