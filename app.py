@@ -485,7 +485,7 @@ def parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
     if not args.watch and not args.once and not args.gui:
-        args.watch = True
+        args.gui = True
 
     if args.variables:
         args.variables = [v.strip() for v in args.variables.split(",") if v.strip()]
