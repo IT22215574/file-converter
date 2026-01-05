@@ -60,6 +60,8 @@ For 2D grids (like `lat` × `lon`) you can choose:
 - `--format long-full`: writes every cell (can be extremely large)
 - `--format matrix`: writes one row per latitude with longitude columns
 
+For 3D grids (like `time` × `lat` × `lon`), `long-sparse` / `long-full` are supported and will write rows as `time,lat,lon,value`.
+
 If you need to re-run a conversion, use:
 
 ```bash

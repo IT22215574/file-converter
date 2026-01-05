@@ -190,11 +190,65 @@ def convert_nc_to_csv(
                             f"Unknown --format '{output_format}'. Use: long-sparse, long-full, matrix."
                         )
 
+                elif len(dims) == 3:
+                    d0, d1, d2 = dims
+                    coord0 = ds.variables[d0][:] if d0 in ds.variables else np.arange(var.shape[0])
+                    coord1 = ds.variables[d1][:] if d1 in ds.variables else np.arange(var.shape[1])
+                    coord2 = ds.variables[d2][:] if d2 in ds.variables else np.arange(var.shape[2])
+
+                    if output_format == "matrix":
+                        raise ValueError(
+                            "--format matrix is only supported for 2D variables. "
+                            "Use --format long-sparse or --format long-full for 3D variables."
+                        )
+
+                    if output_format not in ("long-sparse", "long-full"):
+                        raise ValueError(
+                            f"Unknown --format '{output_format}'. Use: long-sparse, long-full, matrix."
+                        )
+
+                    writer.writerow([d0, d1, d2, var_name])
+
+                    for i0 in range(var.shape[0]):
+                        slab = var[i0, :, :]
+                        if np.ma.isMaskedArray(slab):
+                            slab = slab.filled(np.nan)
+
+                        c0 = _format_cell(coord0[i0])
+
+                        if output_format == "long-full":
+                            for i1 in range(var.shape[1]):
+                                c1 = _format_cell(coord1[i1])
+                                row = slab[i1, :]
+                                for i2 in range(var.shape[2]):
+                                    writer.writerow(
+                                        [c0, c1, _format_cell(coord2[i2]), _format_cell(row[i2])]
+                                    )
+                                    total_rows += 1
+                            continue
+
+                        # long-sparse: skip missing values (NaN)
+                        for i1 in range(var.shape[1]):
+                            c1 = _format_cell(coord1[i1])
+                            row = slab[i1, :]
+
+                            if getattr(row, "dtype", None) is not None and row.dtype.kind in ("f", "c"):
+                                mask = ~np.isnan(row)
+                            else:
+                                mask = np.ones(row.shape, dtype=bool)
+
+                            idx = np.nonzero(mask)[0]
+                            for i2 in idx:
+                                writer.writerow(
+                                    [c0, c1, _format_cell(coord2[i2]), _format_cell(row[i2])]
+                                )
+                                total_rows += 1
+
                 else:
                     raise ValueError(
                         f"Variable '{var_name}' has {len(dims)} dims ({dims}). "
-                        "This app currently supports 1D and 2D variables only. "
-                        "Try specifying a 2D lat/lon variable via --variables."
+                        "This app currently supports 1D, 2D, and 3D variables only. "
+                        "Try specifying a 1D/2D/3D variable via --variables."
                     )
 
         # Report the last output file if only one variable was written; otherwise point to the folder.
@@ -501,7 +555,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="long-sparse",
         choices=["long-sparse", "long-full", "matrix"],
-        help="CSV output format for 2D variables (default: long-sparse)",
+        help="CSV output format (matrix is 2D-only; default: long-sparse)",
     )
     parser.add_argument(
         "--force",
