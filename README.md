@@ -18,6 +18,14 @@ Create/activate your environment (this workspace already has `.venv/` configured
 ./.venv/bin/python app.py --gui
 ```
 
+### Download page (paste links, auto-open with delay)
+
+```bash
+./.venv/bin/python app.py --download-page
+```
+
+Paste one link or multiple links (space/newline/comma separated). The app will open them automatically with a 10 second delay between each.
+
 Select one or more `.nc` files from `Files/`, then press **Convert**. Output CSVs will be written to `Converted files/`.
 
 ### Watch mode (recommended)

@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import time
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -17,6 +19,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_INPUT_DIR = ROOT / "Files"
 DEFAULT_OUTPUT_DIR = ROOT / "Converted files"
 DEFAULT_STATE_PATH = ROOT / ".converted_state.json"
+DEFAULT_DOWNLOAD_STATE_PATH = ROOT / ".download_page_state.json"
 
 
 @dataclass(frozen=True)
@@ -445,10 +448,16 @@ def run_gui(
         refresh_file_list()
         status_var.set(f"Refreshed. Output folder: {output_dir}")
 
+    def on_download_page() -> None:
+        run_download_page(DEFAULT_DOWNLOAD_STATE_PATH, parent=root)
+
     ttk.Button(button_row, text="Refresh", command=on_refresh).grid(
         row=0, column=0, padx=(0, 8)
     )
-    ttk.Button(button_row, text="Convert", command=on_convert).grid(row=0, column=1)
+    ttk.Button(button_row, text="Download Page", command=on_download_page).grid(
+        row=0, column=1, padx=(0, 8)
+    )
+    ttk.Button(button_row, text="Convert", command=on_convert).grid(row=0, column=2)
 
     def poll() -> None:
         refresh_file_list()
@@ -516,9 +525,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Open a desktop app to select and convert files",
     )
+    mode.add_argument(
+        "--download-page",
+        action="store_true",
+        help="Open a desktop page to paste links and auto-open them (10s delay)",
+    )
 
     args = parser.parse_args()
-    if not args.watch and not args.once and not args.gui:
+    if not args.watch and not args.once and not args.gui and not args.download_page:
         args.gui = True
 
     if args.variables:
@@ -529,6 +543,199 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def _load_download_page_state(state_path: Path) -> dict:
+    if not state_path.exists():
+        return {"remember": False, "text": ""}
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"remember": False, "text": ""}
+        remember = bool(data.get("remember", False))
+        text = data.get("text", "")
+        if not isinstance(text, str):
+            text = ""
+        return {"remember": remember, "text": text}
+    except Exception:
+        return {"remember": False, "text": ""}
+
+
+def _save_download_page_state(state_path: Path, *, remember: bool, text: str) -> None:
+    payload = {"remember": bool(remember), "text": text if remember else ""}
+    state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+_URL_SPLIT_RE = re.compile(r"[\s,]+")
+
+
+def _normalize_and_filter_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    for raw in _URL_SPLIT_RE.split(text):
+        token = raw.strip().strip('"\'<>[](){}')
+        token = token.rstrip(".,;:")
+        if not token:
+            continue
+
+        lowered = token.lower()
+        if lowered.startswith("javascript:") or lowered.startswith("data:"):
+            continue
+
+        if "://" not in token:
+            token = "https://" + token
+
+        if not (token.lower().startswith("http://") or token.lower().startswith("https://")):
+            continue
+
+        # Very small sanity check; webbrowser will handle the rest.
+        if "//" not in token:
+            continue
+
+        if token not in seen:
+            urls.append(token)
+            seen.add(token)
+
+    return urls
+
+
+def run_download_page(state_path: Path = DEFAULT_DOWNLOAD_STATE_PATH, *, parent=None) -> None:
+    import tkinter as tk
+    from tkinter import ttk
+
+    if parent is None:
+        win = tk.Tk()
+        is_root = True
+    else:
+        win = tk.Toplevel(parent)
+        is_root = False
+
+    win.title("Download Page (Auto-open links)")
+
+    state = _load_download_page_state(state_path)
+
+    remember_var = tk.BooleanVar(value=bool(state.get("remember", False)))
+    status_var = tk.StringVar(value="Paste one or more links to start.")
+
+    main = ttk.Frame(win, padding=12)
+    main.grid(row=0, column=0, sticky="nsew")
+
+    win.columnconfigure(0, weight=1)
+    win.rowconfigure(0, weight=1)
+    main.columnconfigure(0, weight=1)
+    main.rowconfigure(2, weight=1)
+
+    ttk.Label(
+        main,
+        text="Paste one link or multiple links (space/newline/comma separated).\n"
+        "Links will open automatically with a 10 second delay between each.",
+        justify="left",
+    ).grid(row=0, column=0, sticky="w")
+
+    controls = ttk.Frame(main)
+    controls.grid(row=1, column=0, sticky="ew", pady=(10, 8))
+    controls.columnconfigure(2, weight=1)
+
+    ttk.Checkbutton(controls, text="Remember links", variable=remember_var).grid(
+        row=0, column=0, sticky="w"
+    )
+    ttk.Label(controls, text="Delay: 10s").grid(row=0, column=1, padx=(12, 0), sticky="w")
+
+    text = tk.Text(main, height=10, wrap="word")
+    text.grid(row=2, column=0, sticky="nsew")
+
+    if remember_var.get() and state.get("text"):
+        text.insert("1.0", state.get("text", ""))
+
+    status = ttk.Label(main, textvariable=status_var)
+    status.grid(row=3, column=0, sticky="w", pady=(8, 0))
+
+    button_row = ttk.Frame(main)
+    button_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+
+    running = {"active": False, "urls": [], "index": 0, "after_id": None}
+    delay_ms = 10_000
+
+    def save_state() -> None:
+        _save_download_page_state(
+            state_path,
+            remember=remember_var.get(),
+            text=text.get("1.0", "end").strip(),
+        )
+
+    def stop() -> None:
+        if running["after_id"] is not None:
+            try:
+                win.after_cancel(running["after_id"])
+            except Exception:
+                pass
+        running["active"] = False
+        running["after_id"] = None
+        status_var.set("Stopped.")
+
+    def open_next() -> None:
+        if not running["active"]:
+            return
+
+        idx = running["index"]
+        urls: list[str] = running["urls"]
+        if idx >= len(urls):
+            running["active"] = False
+            running["after_id"] = None
+            status_var.set(f"Done. Opened {len(urls)} link(s).")
+            return
+
+        url = urls[idx]
+        status_var.set(f"Opening {idx + 1}/{len(urls)}: {url}")
+        webbrowser.open(url, new=2, autoraise=True)
+        running["index"] = idx + 1
+        running["after_id"] = win.after(delay_ms, open_next)
+
+    def start_from_text(*_args) -> None:
+        raw = text.get("1.0", "end").strip()
+        urls = _normalize_and_filter_urls(raw)
+
+        if remember_var.get():
+            save_state()
+
+        if not urls:
+            status_var.set("No valid http(s) links found.")
+            return
+
+        stop()
+        running["urls"] = urls
+        running["index"] = 0
+        running["active"] = True
+        open_next()
+
+    def on_paste(_event=None):
+        # Let the paste happen first, then read the Text content.
+        win.after(10, start_from_text)
+        return None
+
+    def on_close() -> None:
+        if remember_var.get():
+            save_state()
+        else:
+            _save_download_page_state(state_path, remember=False, text="")
+        stop()
+        win.destroy()
+
+    ttk.Button(button_row, text="Start", command=start_from_text).grid(
+        row=0, column=0, padx=(0, 8)
+    )
+    ttk.Button(button_row, text="Stop", command=stop).grid(row=0, column=1)
+
+    # Auto-start when user pastes.
+    text.bind("<<Paste>>", on_paste)
+    text.bind("<Control-v>", on_paste)
+    text.bind("<Command-v>", on_paste)
+
+    win.protocol("WM_DELETE_WINDOW", on_close)
+    win.minsize(640, 420)
+    if is_root:
+        win.mainloop()
+
+
 def main() -> None:
     args = parse_args()
 
@@ -536,6 +743,10 @@ def main() -> None:
     state = _load_state(args.state)
     state["format"] = args.format
     _save_state(args.state, state)
+
+    if args.download_page:
+        run_download_page(DEFAULT_DOWNLOAD_STATE_PATH)
+        return
 
     if args.gui:
         run_gui(
